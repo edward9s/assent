@@ -20,7 +20,7 @@ writes = true
 prompt = "Implement the supplied requirements under the governing design principles: use the smallest architecture and fewest states that make invalid behavior difficult to form, one term per actual mechanism, and failure at the first authoritative boundary instead of compatibility or masking. Fix production behavior and satisfy the supplied focused checks; do not weaken, narrow, delete, or rewrite tests merely to make a check pass."
 writes = true
 [abilities.runtime_repair]
-prompt = "Repair the runtime-test failure in the current working tree. You may edit any ordinary project source, tests, fixtures, project configuration, or documentation needed to correct the root cause. Do not run any command, Git, or Assent operation; do not modify task contracts, journals, scheduler state, receipts, Git state, acceptance state, or other control state; and do not declare the runtime test passed."
+prompt = "Repair the runtime-test failure in the current working tree. When the main runtime contract is pending, inspect the implemented project, create the smallest useful runtime probe if needed, and propose explicit execution with its command. You may edit any ordinary project source, tests, fixtures, project configuration, or documentation needed to correct the root cause. Do not run any command, Git, or Assent operation; do not modify task contracts, journals, scheduler state, receipts, Git state, acceptance state, or other control state; and do not declare the runtime test passed."
 writes = true
 [abilities.task_review]
 prompt = "Review the current task against its stated behavior and focused_test evidence. Apply the governing design principles: require the smallest architecture and fewest states, one term per actual mechanism, and failure at the first authoritative boundary instead of compatibility or masking. Treat avoidable state, branching, indirection, tracking, and recovery machinery as substantive defects when a direct invariant can remove them. Do not invent requirements. When relevant test changes are part of the supplied evidence, do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement."
@@ -76,45 +76,55 @@ model = "core"
 ability = ["integration_review", "integration_fix"]
 model = "prime"
 
-# A role may omit adapter for the global rotation, name one fixed adapter, or
-# name an ordered adapter list for availability fallback. A passing scheduler
-# action ends its layer. Failure advances to the next configured repair role,
-# then the next action rechecks the result.
+# Default role entries omit adapter and use the global rotation. The
+# Configuration guide shows how one entry may instead fix an adapter or state
+# an ordered availability list. A passing scheduler action ends its layer.
+# Failure advances to the next configured repair role, then the next action
+# rechecks the result.
 #
 # A role is one session. Sessions run in array order and do not converse; the
 # preceding session output and action evidence are inputs to the next step.
 [workflow]
 preflight = [
   { action = "check" },
-  { role = "preflight_repairer", adapter = ["claude", "codex"] },
+  { role = "preflight_repairer" },
   { action = "check" },
 ]
 task = [
   { role = "implementer" },
   { action = "focused_test" },
-  { role = "task_repairer", adapter = ["claude", "codex"] },
+  { role = "task_repairer" },
   { action = "focused_test" },
-  { role = "task_repairer", adapter = ["claude", "codex"] },
+  { role = "task_repairer" },
   { action = "focused_test" },
-  { role = "task_repairer", adapter = ["claude", "codex"] },
+  { role = "task_repairer" },
   { action = "focused_test" },
 ]
 plan = [
-  { role = "plan_quality_repairer", adapter = ["claude", "codex"] },
+  { role = "plan_quality_repairer" },
   { action = "focused_sweep" },
-  { role = "plan_repairer", adapter = ["claude", "codex"] },
+  { role = "plan_repairer" },
   { action = "focused_sweep" },
-  { role = "plan_repairer", adapter = ["claude", "codex"] },
+  { role = "plan_repairer" },
   { action = "focused_sweep" },
-  { role = "plan_repairer", adapter = ["claude", "codex"] },
+  { role = "plan_repairer" },
   { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
-  { role = "integration_repairer", adapter = ["claude", "codex"] },
+  { role = "integration_repairer" },
   { action = "full_verify" },
-  { role = "integration_repairer", adapter = ["claude", "codex"] },
+  { role = "integration_repairer" },
   { action = "full_verify" },
-  { role = "integration_repairer", adapter = ["claude", "codex"] },
+  { role = "integration_repairer" },
   { action = "full_verify" },
+]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
 ]

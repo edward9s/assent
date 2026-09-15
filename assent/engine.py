@@ -50,7 +50,7 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 
-from assent.config import (PROJECT_LAYER, Config, WorkflowActionStep, WorkflowRoleStep,
+from assent.config import (Config, WorkflowActionStep, WorkflowRoleStep,
                            WorkflowTaskStep, load_config)
 
 from assent.batch_verification import (SelectionCandidateConflict,
@@ -72,6 +72,8 @@ from assent.modeling import effort_identity
 from assent.plan import (Plan, RuntimeQuotaWait,
                          Task, TaskWorkflowAction, append_entry,
                          encode_runtime_action_results,
+                         parse_main_runtime_test_contract,
+                         parse_main_runtime_test_contract_text,
                          parse_runtime_action_results,
                          parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
@@ -94,7 +96,7 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               runtime_test_capability_errors,
                               worktree_configuration_errors)
 
-from assent.verification_common import (source_snapshot,
+from assent.verification_common import (atomic_write_text, source_snapshot,
                                         summary as verification_summary)
 
 def _invoke_adapter(
@@ -2684,16 +2686,10 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
 def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                           sleep: Callable[[float], None] | None = None,
                           now: Callable[[], datetime] | None = None) -> int:
-    """Run and repair the project command in the primary working tree."""
+    """Resolve or run the main runtime contract in the primary working tree."""
     try:
         contracts.require_contracts()
-        if cfg.source_of("runtime_test.command") != PROJECT_LAYER:
-            raise AssentError(
-                "[runtime_test].command must be stated in the project config")
-        commands = cfg.runtime_test_commands
-        if commands is None:
-            raise AssentError(
-                "Project config is missing [runtime_test].command")
+        commands = parse_main_runtime_test_contract(cfg.assent_dir).commands
         steps = _runtime_test_source_steps(cfg)
         if not has_git_marker(cfg.root):
             raise AssentError(GIT_REQUIRED_MESSAGE)
@@ -3013,6 +3009,8 @@ _SESSION_EVIDENCE_ITEMS = 8
 
 _SESSION_EVIDENCE_CHARS = 8_000
 
+_NO_CONTRACT_PROPOSAL = object()
+
 def _task_source_steps(
         cfg: Config, task: Task,
         ) -> tuple[_RoleStep | WorkflowActionStep, ...]:
@@ -3099,7 +3097,9 @@ def _management_changes(before: dict[Path, bytes | None]) -> list[str]:
             changed.append(str(path))
     return changed
 
-def _restore_management_changes(before: dict[Path, bytes | None]) -> list[str]:
+def _restore_management_changes(
+        before: dict[Path, bytes | None], *, quiet: frozenset[Path] = frozenset()
+        ) -> list[str]:
     """Restore role changes to the snapshotted scheduler-owned files exactly."""
     restored: list[str] = []
     for path, prior in before.items():
@@ -3125,9 +3125,10 @@ def _restore_management_changes(before: dict[Path, bytes | None]) -> list[str]:
             raise AssentError(
                 f"Unable to verify restored protected control file {path}")
         restored.append(str(path))
-    if restored:
+    reported = [path for path in restored if Path(path) not in quiet]
+    if reported:
         print("Restored protected control files changed by the role session: "
-              + ", ".join(restored[:8]))
+              + ", ".join(reported[:8]))
     return restored
 
 def _source_workflow_prompt(
@@ -3135,6 +3136,9 @@ def _source_workflow_prompt(
         state: WorkflowState, position: int, total: int) -> str:
     runtime_test = state.unit == "runtime_test"
     main_runtime_test = runtime_test and cfg.tasks_dir == cfg.assent_dir
+    main_runtime_pending = (
+        main_runtime_test
+        and parse_main_runtime_test_contract(cfg.assent_dir).execution == "pending")
     unit = ("runtime_test for main" if main_runtime_test else
             (f"runtime_test for plan {cfg.tasks_name}" if runtime_test else
             (f"task {task.id}" if task is not None else f"plan {cfg.tasks_name}"))
@@ -3144,10 +3148,19 @@ def _source_workflow_prompt(
         + item.path.read_text(encoding="utf-8").rstrip()
         for item in (plan.tasks if task is None else [task]))
     if main_runtime_test:
-        contracts_text = (
-            "Repair the project source so the configured main runtime-test "
-            "command passes. Work directly in the current primary working tree; "
-            "leave every edit visible for the operator's ordinary Git review.")
+        if main_runtime_pending:
+            contract_path = cfg.assent_dir / "_runtime_test.toml"
+            contracts_text = (
+                "The main runtime-test decision is pending. Inspect the implemented "
+                "project, create the smallest useful runtime probe if needed, and "
+                f"replace {contract_path} with exactly execution = \"explicit\" and "
+                "one command or ordered command array. Do not select disabled. The "
+                "scheduler validates and runs the command after this session.")
+        else:
+            contracts_text = (
+                "Repair the project source so the configured main runtime-test "
+                "command passes. Work directly in the current primary working tree; "
+                "leave every edit visible for the operator's ordinary Git review.")
     prior = "\n\n".join(state.evidence) or "(none)"
     action = (_runtime_test_prompt(state) if runtime_test else
               (_focused_test_prompt(state) if task is not None
@@ -3172,6 +3185,16 @@ def _source_workflow_prompt(
         "tests, fixtures, project configuration, and documentation in this "
         "working tree.\n"
         if runtime_test else "")
+    control_policy = (
+        "Task contracts are read-only. Journals, scheduler state, Git state, "
+        "receipts, and files below .git or .assent are also read-only."
+    )
+    if main_runtime_pending:
+        control_policy += (
+            f" The sole exception is {cfg.assent_dir / '_runtime_test.toml'}: "
+            "replace pending with explicit plus a non-empty command; every other "
+            "field or control-file change is forbidden."
+        )
     ignored_input_policy = ""
     if not main_runtime_test:
         ignored_input_policy = (
@@ -3194,8 +3217,7 @@ Role responsibility:
 {task_focus}
 {runtime_policy}
 
-Task contracts are read-only. Journals, scheduler state, Git state, receipts,
-and files below .git or .assent are also read-only. Do not run Git, Assent, a
+{control_policy} Do not run Git, Assent, a
 scheduler-owned focused action, or the full verifier. The scheduler owns every
 checkpoint, task status, journal entry, and action result.
 {ignored_input_policy}
@@ -3257,6 +3279,15 @@ def _run_source_role(
             if state.candidate_head else "")
         _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
         management = _management_snapshot(cfg, plan)
+        main_runtime_contract = cfg.assent_dir / "_runtime_test.toml"
+        discovering_main_runtime = (
+            state.unit == "runtime_test" and cfg.tasks_dir == cfg.assent_dir
+            and parse_main_runtime_test_contract(
+                cfg.assent_dir).execution == "pending")
+        contract_before = (
+            management[main_runtime_contract]
+            if discovering_main_runtime else None)
+        contract_proposal: bytes | None | object = _NO_CONTRACT_PROPOSAL
         source_head = gitops.head_ref(cfg.root)
         primary_head = (gitops.head_ref(cfg.source_root)
                         if cfg.source_root is not None else source_head)
@@ -3278,7 +3309,14 @@ def _run_source_role(
                     session.requested_effort, cfg.root, context_kind=state.unit,
                     context_id=f"workflow.{state.unit}[{state.step_index}]")
             finally:
-                _restore_management_changes(management)
+                quiet = frozenset()
+                if discovering_main_runtime:
+                    current = (main_runtime_contract.read_bytes()
+                               if main_runtime_contract.is_file() else None)
+                    if current != contract_before:
+                        contract_proposal = current
+                        quiet = frozenset((main_runtime_contract,))
+                _restore_management_changes(management, quiet=quiet)
         except KeyboardInterrupt:
             ignored_violations = _ignored_input_violations(
                 ignored_input_guards, (cfg,))
@@ -3384,6 +3422,26 @@ def _run_source_role(
                     state_owner or cfg.tasks_dir, state)
             print(f"Role session failed: {reason}")
             return result.exit_code or 1, state
+
+        if contract_proposal is not _NO_CONTRACT_PROPOSAL:
+            if contract_proposal is None:
+                print("Role session crossed its control boundary: the main "
+                      "runtime-test contract was removed")
+                return 1, state
+            try:
+                proposal_text = contract_proposal.decode("utf-8")
+                proposal = parse_main_runtime_test_contract_text(proposal_text)
+            except (UnicodeError, AssentError) as error:
+                print("Role session crossed its control boundary: invalid main "
+                      f"runtime-test contract proposal ({error})")
+                return 1, state
+            if proposal.execution != "explicit" or proposal.commands is None:
+                print("Role session crossed its control boundary: main runtime "
+                      "discovery must replace pending with explicit plus command")
+                return 1, state
+            atomic_write_text(main_runtime_contract, proposal_text)
+            management[main_runtime_contract] = main_runtime_contract.read_bytes()
+            print("Main runtime-test contract configured for explicit execution.")
 
         violations = _management_changes(management)
         if cfg.source_root is not None:
@@ -3574,6 +3632,32 @@ def _process_source_workflow(
                 cfg.git_excludes)
         print(f"\n{unit.title()} workflow step {state.step_index + 1}/"
               f"{len(steps)}: {step.action}")
+        if main_runtime_test:
+            main_contract = parse_main_runtime_test_contract(cfg.assent_dir)
+            if main_contract.execution == "pending":
+                summary = (
+                    f"{cfg.assent_dir / '_runtime_test.toml'} has execution = "
+                    '"pending"; a writable runtime role must configure explicit '
+                    "execution and command")
+                gate_evidence = f"{step.action} not started:\n{summary}"
+                state = replace(
+                    state, evidence=state.evidence + (gate_evidence,),
+                    action="runtime_test", action_status="",
+                    action_source_tree="", action_exit_code=0,
+                    action_evidence=())
+                _write_source_workflow_state(owner, state)
+                print(f"  {step.action} not started: {summary}")
+                if state.step_index == len(steps) - 1:
+                    state = replace(
+                        state, step_index=len(steps), started=False)
+                    return _source_workflow_gate_unresolved(
+                        cfg, task, state, step.action, summary, now,
+                        state_owner=owner)
+                state = replace(
+                    state, step_index=state.step_index + 1, started=False)
+                _write_source_workflow_state(owner, state)
+                continue
+            runtime_commands = main_contract.commands
         decision = (None if main_runtime_test else _ignored_input_decision(cfg))
         if decision is not None and not decision.settled:
             summary = (ignored_inputs.closeout_refusal(decision)

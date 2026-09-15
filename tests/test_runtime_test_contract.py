@@ -9,6 +9,7 @@ from assent import AssentError
 from assent.plan import (
     RUNTIME_TEST_CONTRACT_NAME,
     RuntimeTestContract,
+    parse_main_runtime_test_contract,
     parse_runtime_test_contract,
 )
 
@@ -39,6 +40,24 @@ class TestRuntimeTestContract(unittest.TestCase):
 
         self.assertEqual(contract, RuntimeTestContract("disabled", None))
         self.assertIsNone(contract.commands)
+
+    def test_main_pending_has_no_command_value(self):
+        self.write_contract('execution = "pending"\n')
+
+        contract = parse_main_runtime_test_contract(self.plan_dir)
+
+        self.assertEqual(contract, RuntimeTestContract("pending", None))
+
+    def test_plan_rejects_main_pending_execution(self):
+        self.assert_rejected(
+            'execution = "pending"\n', "unknown execution 'pending'")
+
+    def test_main_pending_rejects_command(self):
+        self.write_contract(
+            'execution = "pending"\ncommand = "python runtime.py"\n')
+
+        with self.assertRaisesRegex(AssentError, "must not define command"):
+            parse_main_runtime_test_contract(self.plan_dir)
 
     def test_explicit_preserves_command_value(self):
         command = "  python -m unittest tests.test_runtime_test_contract  "

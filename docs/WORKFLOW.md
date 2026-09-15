@@ -82,63 +82,95 @@ preflight role or any sendable adapter remains a manual bootstrap failure.
 The installed `~/.assent/workflow.md` owns this runtime-test contract; this
 guide summarizes how to use it.
 
-`assent test [PLAN]` is separate from the task, plan, and integration layers. A
-plan argument reads that live plan's `_runtime_test.toml` and runs its command
-or ordered command array in the plan candidate worktree. Without a plan
-argument, `assent test` uses the project-layer `[runtime_test].command` directly
-in the current primary working tree. It does not dispatch `full_verify`, write a
-verification receipt, or accept anything.
+`assent test [PLAN]` is separate from task, plan, integration, `full_verify`, and
+`accept`.
 
-The plan contract selects one exact `execution` mode: `disabled` has no runtime
-gate, `explicit` runs only when `assent test PLAN` is requested, and
-`after_plan` runs automatically in `run` after the plan workflow and before the
-selection's integration `full_verify`. Every `after_plan` source must pass its
-own current runtime gate before that full verification starts. Acceptance
-rechecks the same source-bound runtime evidence; `accept` never runs runtime
-testing.
+Main discovery starts with the file created by `assent init`:
 
-For an ordinary plan that uses `explicit`, the human-facing sequence after
-`run` is therefore `assent test <PLAN>` and then `assent accept <PLAN>`.
-`after_plan` needs no separate human test command, and `disabled` has no runtime
-gate.
+```toml
+# .assent/_runtime_test.toml
+execution = "pending"
+```
 
-`[workflow].runtime_test` is a finite linear array of
-`{ action = "runtime_test" }` steps and writable repair roles. The project
-template strictly alternates action, `runtime_repairer`, and action. For an
-array, the scheduler stops at the first nonzero exit or launch failure and
-records completed, failed, and not-run entries for the repair role. After a
-repair, the next action restarts at the first entry because the source changed.
-The runtime action is the authority: every entry exiting 0 records `PASSED`, a
-nonzero exit records `FAILED`, and source or command-list drift records `STALE`.
-Role output cannot declare a pass. A successful repair role that makes no
-working-tree source change ends the workflow unresolved; no extra action is
-invented. This source-change requirement applies only after a runtime command
-actually failed. A plan runtime role that settles an injected ignored-input
-precondition may advance without changing tracked source, and the next action
-then evaluates the command. Main runtime commands run directly in the primary
-working tree and do not use this precondition.
+Running `assent test` then follows this finite sequence:
 
-Runtime role sessions may edit ordinary source, tests, fixtures, project
-configuration, and documentation in the current working tree. They do not run
-commands or change task contracts, journals, scheduler state, receipts, Git, or
-acceptance state. Runtime state records the workflow cursor, bounded evidence,
-candidate identity, and quota waits. Quota interruption checkpoints the
-candidate and resumes that state on restart; it never reverts token-burned work.
-Exhaustion reports `REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence.
-A standalone `assent test [PLAN]` returns 1; an unattended `run` returns 0 for
-this human-decision outcome so unrelated queued plans continue.
+| Step | Observable result |
+| --- | --- |
+| `runtime_test` action | Does not start and is not recorded as `FAILED`. |
+| writable runtime role | Inspects the implemented primary tree and may create a small probe. It proposes only `explicit` plus a command. |
+| scheduler | Restores the role's direct control-file edit, validates it, then installs the proposal. |
+| next `runtime_test` action | Runs the installed command from the beginning. |
 
-Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
-plan contract. Main runtime state is `.assent/_runtime_test_workflow.toml`; its
-commands and repairs operate directly in the primary working tree, where edits
-remain for ordinary Git review. Runtime evidence is not a verification receipt:
-`full_verify` and its receipt remain separate evidence, and acceptance requires
-both fresh receipt evidence and any required current runtime gate.
+A successful proposal looks like:
 
-In a worktree-backed source workflow, an unsettled ignored-input decision
-means the action did not start; Assent records that gate evidence separately
-from test results. A later configured action runs again after FAILED evidence.
-Only matching PASSED evidence is reused to finish interruption recovery.
+```toml
+# .assent/_runtime_test.toml
+execution = "explicit"
+command = "python tools/runtime_probe.py"
+```
+
+An invalid proposal is refused. If no role supplies one, the finite workflow
+ends unresolved. `assent check` remains read-only and never starts discovery.
+
+Plan contracts use the same filename inside the plan directory but have three
+different modes:
+
+| `.assent/<PLAN>/_runtime_test.toml` | Effect |
+| --- | --- |
+| `execution = "disabled"` | No `command` and no runtime gate. |
+| `execution = "explicit"` plus `command` | Run with `assent test <PLAN>`. |
+| `execution = "after_plan"` plus `command` | `assent run` runs it after the plan workflow and before integration `full_verify`. |
+
+For example, an explicit plan follows:
+
+```text
+assent run demo
+assent test demo
+assent accept demo
+```
+
+`after_plan` omits the middle command. `accept` never runs runtime testing; it
+rechecks required source-bound runtime evidence before publication.
+
+The default repair loop is visible directly in the shared configuration:
+
+```toml
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+]
+```
+
+If a command array fails, the trace is:
+
+```text
+runtime_test       first nonzero command -> FAILED; later commands not run
+runtime_repairer   edits ordinary source, tests, fixtures, config, or docs
+runtime_test       restarts the command array from its first command
+```
+
+Only the action records `PASSED`, `FAILED`, or `STALE`; role prose cannot pass a
+test. After a real command failure, a role that changes no source ends
+unresolved. The pending main-contract proposal and a completed ignored-input
+decision are the two cases that may advance without a tracked-source change.
+Per-step adapter examples are in [Configuration](CONFIGURATION.md).
+
+| Target | Contract | Workflow state | Working tree |
+| --- | --- | --- | --- |
+| current main | `.assent/_runtime_test.toml` | `.assent/_runtime_test_workflow.toml` | primary tree |
+| live plan | `.assent/<PLAN>/_runtime_test.toml` | `.assent/<PLAN>/_runtime_test_workflow.toml` | plan candidate |
+
+Runtime roles never run commands or change Git, journals, receipts, task
+contracts, scheduler state, or acceptance state. Quota interruption preserves
+their edits and resumes the saved workflow position. Exhaustion reports
+`REVIEW UNRESOLVED, HUMAN DECISION`: standalone `assent test [PLAN]` returns 1,
+while unattended `run` returns 0 so unrelated plans continue. Runtime evidence
+is not a verification receipt; `full_verify` remains separate evidence.
 
 Role and ability names have no scheduler meaning. Abilities supply prompt text
 and write authority. A writable role may repair any ordinary candidate file

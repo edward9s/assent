@@ -58,7 +58,24 @@ model = "core"
 If any composed ability has `writes = true`, the role is writable. Adapter
 selection belongs to the workflow entry: `adapter = "codex"` selects one, and
 `adapter = [...]` is an ordered availability list. Omitting it uses the global
-adapter rotation.
+adapter rotation from `[adapter].name`. The shipped workflow omits `adapter` on
+every role entry.
+
+The same role can therefore be placed differently at each workflow position:
+
+```toml
+[workflow]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" }, # Global rotation.
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = "codex" }, # Codex only.
+  { action = "runtime_test" },
+  # Ordered fallback with a per-step model override.
+  { role = "runtime_repairer", adapter = ["claude", "codex"], model = "prime" },
+  { action = "runtime_test" },
+]
+```
 
 For a task session, model precedence is workflow entry model > role model > task file model. A task-local workflow entry contains only a role or action, so its
 named role falls back directly to the task tier. Plan and integration sessions
@@ -86,9 +103,17 @@ task = [
   { action = "focused_test" },
   { role = "task_repairer" },
   { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
 ]
 plan = [
   { role = "plan_quality_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
   { action = "focused_sweep" },
   { role = "plan_repairer" },
   { action = "focused_sweep" },
@@ -97,8 +122,16 @@ integration = [
   { action = "full_verify" },
   { role = "integration_repairer" },
   { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
 ]
 runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
   { action = "runtime_test" },
   { role = "runtime_repairer" },
   { action = "runtime_test" },
@@ -116,8 +149,11 @@ Each entry contains exactly one `role` or `action`. Legal actions are:
 | `runtime_test` | `runtime_test` | Run the declared runtime command in its candidate. |
 
 A role success advances one position. A passing action completes the layer and
-skips later positions. A failing action advances. Exhaustion without a pass is
-`REVIEW UNRESOLVED, HUMAN DECISION` with exit zero and preserved evidence.
+skips later positions. A failing action advances. When entered by `assent run`,
+exhaustion becomes `REVIEW UNRESOLVED, HUMAN DECISION`, preserves evidence, and
+returns zero so unrelated plans continue. Standalone `assent test [PLAN]`
+returns 1 when its runtime workflow is exhausted. A final preflight failure is
+a refused precondition and also returns nonzero.
 
 `preflight` strictly alternates `check` actions with writable repair roles and
 starts and ends with the action. `assent run` enters it before task execution;
@@ -166,42 +202,50 @@ use `workflow = [{ action = "focused_test" }]` when no AI session is wanted.
 ## Runtime-test settings
 
 Runtime testing has its own workflow layer and does not reuse task, plan, or
-integration actions. The shared settings define the writable
-`runtime_repairer` role. When a plan selects `explicit` or `after_plan`, the
-planning meeting defines a strict alternating `[workflow].runtime_test` array
-of `runtime_test` actions and that repair role in `.assent/assent.toml`. A
-custom runtime role must be writable and state a model; the array begins and
-ends with an action.
+integration actions. The shared `~/.assent/assent.toml` defines the writable
+`runtime_repairer` role and a default workflow with three repair attempts. A
+project may replace `[workflow].runtime_test`; its array must strictly
+alternate actions and writable roles, begin and end with an action, and give
+each custom role a model. Each role entry may independently select its adapter
+as shown above.
 
-The main-candidate command is project-specific and must be stated in the
-project `.assent/assent.toml`:
+`assent init` creates the main contract at `.assent/_runtime_test.toml` without
+guessing the project command:
 
 ```toml
-[runtime_test]
+execution = "pending"
+```
+
+On the first no-argument `assent test`, a pending action records that it did not
+start. The next configured writable role inspects the implemented project and
+proposes the exact transition to `explicit` with one command:
+
+```toml
+execution = "explicit"
 command = "python -m unittest tests.test_runtime"
 ```
 
-For several ordered commands, keep the same singular key and use an array:
+or an ordered command array:
 
 ```toml
-[runtime_test]
+execution = "explicit"
 command = ["python tools/probe_a.py", "python tools/probe_b.py"]
 ```
 
-`assent init` neither asks for nor creates this optional main-candidate command.
-Configure it explicitly only when `assent test` without `PLAN` is needed. The
-ability and role definitions remain inherited from `~/.assent/assent.toml`.
+The role cannot select `disabled`. Assent first restores its direct edit to the
+control file, then validates the proposal and installs it as scheduler-owned
+state. The following action runs the command from the beginning. `assent check`
+remains read-only and never invokes this discovery workflow.
 
-This `[runtime_test].command` accepts one non-empty string or a non-empty array
-of non-empty strings and is used only by `assent test` without `PLAN`.
-Each plan instead writes its own `_runtime_test.toml` contract, whose exact
-`execution` modes and `command` presence rules are in `format.md`. A plan
-command never falls back to `task.verify` or the project command.
+Each plan instead has its own `_runtime_test.toml` contract with `disabled`,
+`explicit`, or `after_plan`; its exact rules are in `format.md`. A plan command
+never falls back to the main contract or a task's `verify` command.
 
 The runtime repair ability may edit ordinary candidate source, tests, fixtures,
 project configuration, and documentation. It may not run a command or change
-Assent/Git control state, and its text cannot declare a runtime pass. The full
-runtime workflow and candidate lifecycle are in [Workflow](WORKFLOW.md).
+Assent/Git control state, apart from proposing the pending main contract's one
+validated transition. Its text cannot declare a runtime pass. The full runtime
+workflow and candidate lifecycle are in [Workflow](WORKFLOW.md).
 
 ## Usage limits
 

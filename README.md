@@ -17,10 +17,10 @@ The ordinary human-facing path is deliberately small:
 
 | Stage | What happens | Main command |
 | --- | --- | --- |
-| Initialize | Install Assent's shared contracts/settings and create the project skeleton. | `assent init` |
+| Initialize | Install shared contracts/settings and create the fail-closed verifier plus a pending main runtime decision. | `assent init` |
 | Plan | Discuss requirements with any AI you choose. The planning AI creates `.assent/<PLAN>/` and must run `assent check` until it passes before ending the meeting. | AI-owned `assent check` |
 | Run | Let Assent implement, test, repair, and verify the plan within finite limits. | `assent run` |
-| Runtime test | Run the plan's declared runtime workflow when it is `explicit`; `after_plan` runs automatically during `run`. | `assent test <PLAN>` |
+| Runtime test | Resolve or run the current main runtime decision, or run an `explicit` plan decision; `after_plan` runs during `run`. | `assent test [PLAN]` |
 | Accept | Make the human publication decision using matching evidence. | `assent accept <PLAN>` |
 | Archive | Retire the finished plan. Archive performs the same safe cleanup as `clean` before compressing the plan record. | `assent archive <PLAN>` |
 
@@ -107,11 +107,12 @@ recovery, and advanced workflows. They are not extra steps in the ordinary
 happy path.
 
 `assent init` installs shared settings and three AI contracts under
-`~/.assent/` and creates the project skeleton without asking for commands. Its
+`~/.assent/`. It also creates `.assent/_runtime_test.toml` with
+`execution = "pending"`; no command is guessed during initialization. Its
 `.assent/verify.py` starts fail-closed. Before finishing the first live plan,
 the planning AI configures its complete project-test block, chooses that plan's
-`_runtime_test.toml`, adds a project runtime-test workflow when needed, and runs
-`assent check` until it passes.
+`_runtime_test.toml`, and runs `assent check` until it passes. The shared
+settings already contain the runtime-test repair workflow.
 
 ## What happens during `run`
 
@@ -145,12 +146,16 @@ cumulative implementation matches the agreed plan.
 
 `assent test [PLAN]` is an independent runtime-test workflow. With `PLAN`, it
 uses that live plan's `_runtime_test.toml` command or ordered command array in
-the plan candidate. Without `PLAN`, it uses the project-layer
-`[runtime_test].command` directly in the current primary working tree. A plan
-using `execution = "after_plan"` runs this workflow after its plan layer and
-before integration `full_verify`; `accept` never runs runtime testing. An array
-stops at its first failed command; repair evidence names that command, and the
-next runtime action restarts the array from the beginning.
+the plan candidate. Without `PLAN`, it reads the main contract at
+`.assent/_runtime_test.toml` and works directly in the current primary tree.
+On the first run, `pending` means the command has not been decided: the action
+does not start, a configured writable role inspects the implemented project and
+proposes `explicit` plus a command, and the scheduler validates and installs
+that proposal before the next action runs it. A plan using
+`execution = "after_plan"` runs this workflow after its plan layer and before
+integration `full_verify`; `accept` never runs runtime testing. An array stops
+at its first failed command; repair evidence names that command, and the next
+runtime action restarts the array from the beginning.
 
 Integration keeps the exact selected plans. Typed Git conflict evidence names
 the conflicting plan and paths, so a configured integration role may repair it

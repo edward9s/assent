@@ -86,7 +86,7 @@ class TestInitContractRefresh(unittest.TestCase):
         self.assertIn("hand-create a source-worktree link", text)
         self.assertFalse((self.root / ".assent/instructions.md").exists())
 
-    def test_init_installs_runtime_defaults_without_a_plan_contract_or_command(self):
+    def test_init_installs_runtime_workflow_and_pending_main_contract(self):
         for name in ("instructions.md", "format.md", "workflow.md"):
             (self.user_home / name).write_text("older contract\n",
                                                 encoding="utf-8")
@@ -103,11 +103,18 @@ class TestInitContractRefresh(unittest.TestCase):
         config_text = config_path.read_text(encoding="utf-8")
         config = tomllib.loads(config_text)
         self.assertEqual(config["roles"]["runtime_repairer"]["model"], "core")
-        self.assertNotIn("runtime_test", config["workflow"])
+        runtime_workflow = config["workflow"]["runtime_test"]
+        self.assertEqual(len(runtime_workflow), 7)
+        self.assertEqual(
+            [entry.get("role") for entry in runtime_workflow if "role" in entry],
+            ["runtime_repairer"] * 3)
         self.assertNotIn("[runtime_test]", config_text)
-        self.assertEqual(list(self.root.rglob("_runtime_test.toml")), [])
+        self.assertEqual(
+            (self.root / ".assent/_runtime_test.toml").read_text(
+                encoding="utf-8"),
+            'execution = "pending"\n')
 
-    def test_init_leaves_project_runtime_settings_for_planning(self):
+    def test_init_does_not_create_a_project_settings_override(self):
         output = io.StringIO()
         with patch("builtins.input",
                    side_effect=AssertionError("unexpected command prompt")), \
@@ -116,6 +123,18 @@ class TestInitContractRefresh(unittest.TestCase):
 
         self.assertFalse((self.root / ".assent/assent.toml").exists())
         self.assertIn("planning AI", output.getvalue())
+
+    def test_repeat_init_preserves_the_main_runtime_decision(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+        contract = self.root / ".assent/_runtime_test.toml"
+        decided = 'execution = "explicit"\ncommand = "python runtime.py"\n'
+        contract.write_text(decided, encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+
+        self.assertEqual(contract.read_text(encoding="utf-8"), decided)
 
     def test_check_rejects_verifier_until_planning_replaces_the_marker(self):
         with contextlib.redirect_stdout(io.StringIO()):

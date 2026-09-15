@@ -49,12 +49,9 @@ class RuntimeTestCliTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def write_config(self, *, runtime_workflow: bool = True,
-                     project_command: bool = True) -> Path:
+    def write_config(self, *, runtime_workflow: bool = True) -> Path:
         workflow = 'runtime_test = [{ action = "runtime_test" }]\n' \
             if runtime_workflow else ""
-        runtime_config = ('[runtime_test]\ncommand = "not-used-by-check"\n'
-                          if project_command else "")
         path = self.assent_dir / "assent.toml"
         path.write_text(
             '[adapter]\nname = "claude"\n'
@@ -65,8 +62,7 @@ class RuntimeTestCliTests(unittest.TestCase):
             'lite = "test-lite/low"\n'
             '[workflow]\n'
             'task = [{ action = "focused_test" }]\n'
-            + workflow
-            + runtime_config,
+            + workflow,
             encoding="utf-8")
         return path
 
@@ -156,7 +152,7 @@ class RuntimeTestCliTests(unittest.TestCase):
         main_test.assert_called_once()
         self.assertEqual(main_test.call_args.args[0].tasks_name, "main")
         self.assertIn("Runtime test target: current main", output)
-        self.assertIn("project config [runtime_test].command", output)
+        self.assertIn("main runtime contract", output)
         self.assertIn(f"Runtime test working tree: {self.root}", output)
 
     def test_plan_selection_is_exact_and_does_not_dispatch_fuzzy_names(self):
@@ -206,8 +202,7 @@ class RuntimeTestCliTests(unittest.TestCase):
         self.assertIn("Runtime-test workflow: OK", output)
 
         self.write_contract("plan01", "disabled")
-        config = self.write_config(runtime_workflow=False,
-                                   project_command=False)
+        config = self.write_config(runtime_workflow=False)
         cfg = load_config(config, "plan01")
         code, output = self.check(cfg)
         self.assertEqual(code, 0)

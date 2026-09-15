@@ -1,7 +1,8 @@
 # Assent plan format
 
-> `~/.assent/format.md` defines the plan folder and its task and journal
-> files. Read it before creating, reviewing, or changing a plan.
+> `~/.assent/format.md` defines the project runtime-test contract and each plan
+> folder with its task and journal files. Read it before creating, reviewing,
+> or changing a plan.
 > `workflow.md` separately owns scheduler, CLI, report, receipt, and
 > acceptance behavior. `assent check` passing is the mechanical format gate.
 
@@ -24,6 +25,7 @@ project/
 ├── AGENTS.md
 └── .assent/
     ├── verify.py
+    ├── _runtime_test.toml               # main runtime-test decision
     └── <plan>/
         ├── _plan_deps.toml              # optional dependency declaration
         ├── _runtime_test.toml           # required runtime-test decision
@@ -77,7 +79,31 @@ A plan is complete exactly when every formal task is `DONE` or `SKIP`.
 Scheduler ordering, selection, verification, acceptance, rework, rejection,
 archive, and cleanup are defined in `~/.assent/workflow.md`.
 
-### Runtime-test contract: `_runtime_test.toml`
+### Main runtime-test contract: `.assent/_runtime_test.toml`
+
+`assent init` creates this project-root contract before the runtime command or
+its execution mechanism can be known:
+
+```toml
+execution = "pending"
+```
+
+The no-argument `assent test` workflow resolves it to:
+
+```toml
+execution = "explicit"
+command = "python -m unittest tests.test_runtime"
+```
+
+or to an ordered non-empty command array. `execution` is exactly `pending` or
+`explicit`. `pending` forbids `command`; `explicit` requires one non-empty
+string or a non-empty array of non-empty strings. A writable main runtime role
+may propose only that exact transition. The scheduler restores the direct edit,
+validates it, and installs it before a later action runs the command. There is
+no `disabled` or `after_plan` main mode, compatibility reader, or fallback to a
+task command.
+
+### Plan runtime-test contract: `<plan>/_runtime_test.toml`
 
 Every live plan contains exactly one `_runtime_test.toml` plan-level formal
 file. It states the plan's runtime-test decision; omitting the file is not a

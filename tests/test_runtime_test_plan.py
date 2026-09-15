@@ -19,23 +19,18 @@ class RuntimeTestPlanTests(EngineTestCase):
         (self.root / "src" / "value.txt").write_text("bad\n", encoding="utf-8")
         self.commit_all()
 
-    def build_runtime(self, command: str, *, extra_role: bool = True,
-                      config_command: str | None = None):
+    def build_runtime(self, command: str, *, extra_role: bool = True):
         entries = ['{ action = "runtime_test" }']
         if extra_role:
             entries += ['{ role = "writer", model = "lite" }',
                         '{ action = "runtime_test" }']
-        config_runtime = ("\n[runtime_test]\ncommand = "
-                          f'{json.dumps(config_command)}\n'
-                          if config_command else "")
         cfg = self.build(extra_config=(
             "[workflow]\n"
             "task = [{ action = \"focused_test\" }]\n"
             f"runtime_test = [{', '.join(entries)}]\n"
             "[abilities.write]\nprompt = \"Repair the runtime failure.\"\n"
             "writes = true\n"
-            "[roles.writer]\nability = [\"write\"]\n"
-            + config_runtime))
+            "[roles.writer]\nability = [\"write\"]\n"))
         (self.plan_dir / "_runtime_test.toml").write_text(
             f'execution = "explicit"\ncommand = {json.dumps(command)}\n',
             encoding="utf-8")
@@ -53,9 +48,7 @@ class RuntimeTestPlanTests(EngineTestCase):
         command = ('python -c "import pathlib,sys;sys.exit('
                    "0 if pathlib.Path('src/value.txt').read_text().strip() == "
                    "'bad' else 7)\"")
-        cfg = self.build_runtime(
-            command, extra_role=False,
-            config_command='python -c "raise SystemExit(9)"')
+        cfg = self.build_runtime(command, extra_role=False)
         (self.plan_dir / "_runtime_test.toml").write_text(
             f'execution = "after_plan"\ncommand = {json.dumps(command)}\n',
             encoding="utf-8")

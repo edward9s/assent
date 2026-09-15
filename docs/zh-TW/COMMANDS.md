@@ -48,7 +48,7 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 | --- | --- |
 | `init` | **人類正常流程。** 安裝共用契約與設定，建立專案骨架。 |
 | `run` | **人類正常流程。** 執行 task、plan 與 integration workflow。 |
-| `test` | **需要時的人類正常流程。** 執行 plan 宣告的 runtime command，或在目前 main candidate 執行 project command。 |
+| `test` | **需要時的人類正常流程。** 判定或執行 main runtime contract，或執行 plan 宣告的 command。 |
 | `accept` | **人類正常流程。** 人類依相符證據發布成果。 |
 | `archive` | **人類正常流程。** 安全清理並封存完成的管理紀錄。 |
 | `check` | **Planning AI／診斷。** 不開 AI，檢查計畫、設定與相依關係。 |
@@ -65,11 +65,11 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 ## 初始化專案
 
-`assent init` 會安裝共用契約與設定，並建立 fail-closed 的
-`.assent/verify.py` 骨架，不詢問 verification 或 runtime command。更新 framework
-時會保留既有 project-owned verifier command block，並原樣保留
-`.assent/assent.toml`。Planning meeting 負責配置 verifier 與 plan runtime decision，
-planning AI 必須在結束會議前反覆執行最後的 `assent check` 直到通過。
+`assent init` 會安裝共用契約與設定、建立 fail-closed 的 `.assent/verify.py`，並建立
+內容為 `execution = "pending"` 的 `.assent/_runtime_test.toml`；它不詢問 command。
+更新 framework 時會保留既有 project-owned verifier command block、main runtime
+decision 與 `.assent/assent.toml`。Planning meeting 負責配置 verifier 與各 plan 的
+runtime decision；planning AI 必須在結束會議前反覆執行 `assent check` 直到通過。
 
 ## 執行
 
@@ -108,16 +108,23 @@ Plan 形式讀取 `.assent/<PLAN>/_runtime_test.toml`，在 plan candidate workt
 不需要人類另外 test；`execution = "explicit"` 才是 `run` 後執行
 `assent test <PLAN>` 的一般理由。
 
-省略 `PLAN` 時，使用 `.assent/assent.toml` project layer 的
-`[runtime_test].command`，直接測試目前的 primary working tree：
+省略 `PLAN` 時，讀取 main runtime contract `.assent/_runtime_test.toml`，直接處理
+目前的 primary working tree：
 
 ```text
 assent test
 ```
 
+`assent init` 會把這份 contract 建立為 `execution = "pending"`。第一次執行
+`assent test` 時不會猜測或執行 command；下一個已設定的可寫 runtime role 會檢查
+完成後的專案，提出 `explicit` 與非空 command。Assent 先還原 role 對 control file
+的直接修改，再驗證提案並由 scheduler 寫入，下一個 runtime action 才執行它。
+提案無效時會直接拒絕；提案缺漏時有限 workflow 會以 unresolved 結束。兩者都回傳
+非 0。
+
 `test` 只啟動獨立的 `runtime_test` workflow，不會執行 task、plan、integration、
 `full_verify` 或 `accept`。完整的 mode、state、repair、quota 與 source-bound
-evidence 規則見[工作流程](WORKFLOW.md)；main command 與 repair role 的設定見
+evidence 規則見[工作流程](WORKFLOW.md)；repair role 的設定與 adapter 範例見
 [設定](CONFIGURATION.md)。
 
 ## 可選檢查與手動驗證

@@ -199,6 +199,20 @@ class TestContractContent(unittest.TestCase):
         self.assertNotIn("[runtime_test].command", text)
         self.assertNotIn("project command", text)
 
+    def test_main_runtime_contract_starts_pending_and_is_scheduler_resolved(self):
+        text = (_PROJECT_ROOT / "assent/templates/format.md").read_text(
+            encoding="utf-8")
+        compact = " ".join(text.split())
+        for phrase in (
+                "Main runtime-test contract",
+                "`assent init` creates this project-root contract",
+                'execution = "pending"',
+                "exactly `pending` or `explicit`",
+                "scheduler restores the direct edit",
+                "There is no `disabled` or `after_plan` main mode"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(" ".join(phrase.split()), compact)
+
     def test_planning_instructions_configure_both_verification_gates(self):
         text = (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(
             encoding="utf-8")
@@ -233,7 +247,16 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(data["roles"]["runtime_repairer"]["ability"],
                          ["runtime_repair"])
         self.assertEqual(data["roles"]["runtime_repairer"]["model"], "core")
-        self.assertNotIn("runtime_test", data["workflow"])
+        workflow = data["workflow"]["runtime_test"]
+        self.assertEqual(len(workflow), 7)
+        self.assertEqual(
+            [entry.get("action") for entry in workflow[::2]],
+            ["runtime_test"] * 4)
+        self.assertEqual(
+            [entry.get("role") for entry in workflow[1::2]],
+            ["runtime_repairer"] * 3)
+        self.assertTrue(all("adapter" not in entry for entry in workflow))
+        self.assertNotIn('adapter = ["claude", "codex"]', config_text)
         self.assertNotIn("[runtime_test]", config_text)
 
     def test_workflow_contract_states_the_three_governing_principles(self):
@@ -316,7 +339,8 @@ class TestContractContent(unittest.TestCase):
             (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
                 encoding="utf-8").split())
         for phrase in (
-                "`assent test [PLAN]`", "project-layer `[runtime_test].command`",
+                "`assent test [PLAN]`", "root `.assent/_runtime_test.toml` contract",
+                '`execution = "pending"`', "scheduler captures the proposal",
                 "plan candidate worktree", "current primary working tree",
                 "after the plan workflow and before the selection's integration `full_verify`",
                 "exit 0 records `PASSED`", "source or command-list drift records `STALE`",

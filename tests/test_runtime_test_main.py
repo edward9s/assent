@@ -21,7 +21,7 @@ class MainRuntimeTestTests(EngineTestCase):
         self.obsolete_candidate = (
             self.root.parent / f"{self.root.name}.runtime-test" / "main")
 
-    def build_main(self, command: str, *, repair: bool = False):
+    def build_main(self, command: str | None, *, repair: bool = False):
         workflow = ['{ action = "runtime_test" }']
         role = ""
         if repair:
@@ -39,13 +39,16 @@ class MainRuntimeTestTests(EngineTestCase):
             'prime = "fable/high"\ncore = "opus/high"\n'
             'lite = "sonnet/medium"\n'
             + role
-            + "[runtime_test]\ncommand = "
-            + json.dumps(command)
-            + "\n[workflow]\n"
+            + "[workflow]\n"
             + 'task = [{ action = "focused_test" }]\n'
             + "runtime_test = [" + ", ".join(workflow) + "]\n")
         path = self.root / ".assent" / "assent.toml"
         path.write_text(text, encoding="utf-8")
+        contract = self.root / ".assent" / "_runtime_test.toml"
+        contract_text = ('execution = "pending"\n' if command is None else
+                         'execution = "explicit"\ncommand = '
+                         + json.dumps(command) + "\n")
+        contract.write_text(contract_text, encoding="utf-8")
         return load_main_runtime_config(path)
 
     def run_main(self, cfg, adapter):
@@ -113,15 +116,50 @@ class MainRuntimeTestTests(EngineTestCase):
         self.assertEqual(gitops.head_ref(self.root), base)
         self.assertEqual((self.root / "value.txt").read_text(), "good\n")
 
-    def test_project_command_is_required_before_execution(self):
-        cfg = self.build_main(python_command("raise SystemExit(0)"))
-        cfg.provenance["runtime_test.command"] = "user"
+    def test_pending_contract_is_configured_then_executed(self):
+        command = python_command("raise SystemExit(0)")
+        cfg = self.build_main(None, repair=True)
+        contract = self.root / ".assent/_runtime_test.toml"
+
+        def discover(prompt):
+            self.assertIn("main runtime-test decision is pending", prompt)
+            self.assertIn(str(contract), prompt)
+            contract.write_text(
+                'execution = "explicit"\ncommand = '
+                + json.dumps(command) + "\n", encoding="utf-8")
+            return ok_result()
+
+        code, output = self.run_main(cfg, ScriptedAdapter([discover]))
+
+        self.assertEqual(code, 0)
+        self.assertIn("not started", output)
+        self.assertIn("configured for explicit execution", output)
+        self.assertIn('execution = "explicit"', contract.read_text())
+        self.assertFalse(self.obsolete_candidate.exists())
+
+    def test_invalid_pending_contract_proposal_is_restored_and_refused(self):
+        cfg = self.build_main(None, repair=True)
+        contract = self.root / ".assent/_runtime_test.toml"
+
+        def disable(_prompt):
+            contract.write_text('execution = "pending"\ncommand = "run"\n',
+                                encoding="utf-8")
+            return ok_result()
+
+        code, output = self.run_main(cfg, ScriptedAdapter([disable]))
+
+        self.assertEqual(code, 1)
+        self.assertEqual(contract.read_text(), 'execution = "pending"\n')
+        self.assertIn("invalid main runtime-test contract proposal", output)
+
+    def test_pending_contract_without_a_repair_role_stays_unresolved(self):
+        cfg = self.build_main(None)
 
         code, output = self.run_main(cfg, ScriptedAdapter([]))
 
         self.assertEqual(code, 1)
-        self.assertIn("must be stated in the project config", output)
-        self.assertFalse(self.obsolete_candidate.exists())
+        self.assertIn("execution = \"pending\"", output)
+        self.assertIn("REVIEW UNRESOLVED", output)
 
     def test_separate_legacy_source_is_preserved_and_refused(self):
         cfg = self.build_main(python_command("raise SystemExit(0)"))

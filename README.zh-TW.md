@@ -18,10 +18,10 @@ Assent 把人類與 AI 談妥的設計，轉成可以隔離執行、重複驗證
 
 | 階段 | 會發生什麼 | 主要指令 |
 | --- | --- | --- |
-| 初始化 | 安裝 Assent 共用契約與設定，建立專案骨架。 | `assent init` |
+| 初始化 | 安裝共用契約與設定，建立 fail-closed verifier 與 pending main runtime decision。 | `assent init` |
 | 規劃 | 使用你自己選擇的 AI 討論需求。Planning AI 建立 `.assent/<PLAN>/`，並在結束會議前自行執行 `assent check` 直到通過。 | AI 負責 `assent check` |
 | 執行 | 讓 Assent 在有限流程內實作、測試、修復與驗證計畫。 | `assent run` |
-| Runtime test | Plan 為 `explicit` 時執行宣告的 runtime workflow；`after_plan` 會在 `run` 中自動執行。 | `assent test <PLAN>` |
+| Runtime test | 判定或執行目前 main runtime decision，或執行 `explicit` plan decision；`after_plan` 由 `run` 自動執行。 | `assent test [PLAN]` |
 | 接受 | 由人依相符證據決定是否發布成果。 | `assent accept <PLAN>` |
 | 封存 | 結束這份 plan；archive 會先執行與 `clean` 相同的安全清理，再封存紀錄。 | `assent archive <PLAN>` |
 
@@ -99,11 +99,11 @@ assent run --jobs 2
 `ignored-inputs` 仍提供檢查、手動驗證、復原與進階流程使用；它們不是正常 happy
 path 額外必走的步驟。
 
-`assent init` 會把共用設定與三份 AI 契約安裝到 `~/.assent/`，並在不詢問 command
-的情況下建立專案骨架；新建的 `.assent/verify.py` 預設 fail-closed。第一次 live
-plan 結束規劃前，planning AI 會配置完整的 project-test block、選擇該 plan 的
-`_runtime_test.toml`、按需要加入 project runtime-test workflow，並反覆執行
-`assent check` 直到通過。
+`assent init` 會把共用設定與三份 AI 契約安裝到 `~/.assent/`，並建立內容為
+`execution = "pending"` 的 `.assent/_runtime_test.toml`；初始化時不猜 command。
+新建的 `.assent/verify.py` 預設 fail-closed。第一次 live plan 結束規劃前，planning
+AI 會配置完整的 project-test block、選擇該 plan 的 `_runtime_test.toml`，並反覆
+執行 `assent check` 直到通過。共用設定已包含 runtime-test repair workflow。
 
 ## `run` 會做什麼
 
@@ -131,11 +131,13 @@ Task action 失敗時仍留在 task 層，並依設定的有限 steps 前進。P
 
 `assent test [PLAN]` 是獨立的 runtime-test workflow。有 `PLAN` 時，使用該 live
 plan 的 `_runtime_test.toml` 單一 command 或有序 command array，在 plan candidate
-中執行；省略 `PLAN` 時，使用 project layer 的 `[runtime_test].command`，直接在
-目前 primary working tree 執行。`execution = "after_plan"` 的 plan 會在 plan layer
-完成後、integration `full_verify` 前執行這個 workflow；`accept` 絕不執行 runtime
-testing。Array 會在第一個失敗 command 停止；repair evidence 會指出該 command，
-下一個 runtime action 從頭重跑。
+中執行；省略 `PLAN` 時，讀取 main contract `.assent/_runtime_test.toml`，直接在
+目前 primary working tree 執行。第一次執行時，`pending` 表示 command 尚未決定：
+action 不會啟動；下一個已設定的可寫 role 會檢查完成後的專案，提出 `explicit` 與
+command，再由 scheduler 驗證、寫入，並由下一個 action 執行。`execution =
+"after_plan"` 的 plan 會在 plan layer 完成後、integration `full_verify` 前執行這個
+workflow；`accept` 絕不執行 runtime testing。Array 會在第一個失敗 command 停止；
+repair evidence 會指出該 command，下一個 runtime action 從頭重跑。
 
 Integration 會維持原本選取的完整計畫集合。Typed Git conflict evidence 會指出
 衝突的 plan 與 paths，因此已設定的 integration role 可以在 scheduler 提供的

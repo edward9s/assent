@@ -51,7 +51,7 @@ project-location rules.
 | --- | --- |
 | `init` | **Normal human path.** Install shared contracts/settings and create the project skeleton. |
 | `run` | **Normal human path.** Execute task, plan, and integration workflows. |
-| `test` | **Normal human path when required.** Run a plan's declared runtime command, or the project command against the current main candidate. |
+| `test` | **Normal human path when required.** Resolve or run the main runtime contract, or run a plan's declared command. |
 | `accept` | **Normal human path.** Human publication decision using matching evidence. |
 | `archive` | **Normal human path.** Safely clean and retire completed management records. |
 | `check` | **Planning AI / diagnostics.** Validate plan files, configuration, and dependencies without AI. |
@@ -68,13 +68,12 @@ project-location rules.
 
 ## Initialize a project
 
-`assent init` installs the shared contracts and settings and creates a
-fail-closed `.assent/verify.py` skeleton without asking for verification or
-runtime commands. It preserves an existing project-owned verifier command block
-when refreshing the framework and preserves `.assent/assent.toml` unchanged.
-The planning meeting configures the verifier and plan runtime decision, and the
-planning AI runs the final `assent check` until it passes before ending the
-meeting.
+`assent init` installs the shared contracts and settings, creates a fail-closed
+`.assent/verify.py`, and creates `.assent/_runtime_test.toml` with
+`execution = "pending"`. It asks for no command. A refresh preserves an existing
+project-owned verifier command block, main runtime decision, and
+`.assent/assent.toml`. The planning meeting configures the verifier and each
+plan runtime decision; its AI runs the final `assent check` until it passes.
 
 ## Run
 
@@ -115,17 +114,25 @@ command. `execution = "after_plan"` runs automatically during `assent run`, so
 a separate human `test` is unnecessary in that mode. `execution = "explicit"`
 is the normal reason to run `assent test <PLAN>` after `run`.
 
-The no-`PLAN` form runs the project-layer `[runtime_test].command` from
-`.assent/assent.toml` directly in the current primary working tree:
+The no-`PLAN` form reads the main runtime contract
+`.assent/_runtime_test.toml` and works directly in the current primary tree:
 
 ```text
 assent test
 ```
 
+`assent init` creates that contract as `execution = "pending"`. The first
+`assent test` does not guess or run a command: its next configured writable
+runtime role inspects the implemented project and proposes `explicit` with a
+non-empty command. Assent restores the role's direct control-file edit,
+validates the proposal, installs it as scheduler-owned state, and the next
+runtime action executes it. An invalid proposal is refused; a missing proposal
+leaves the finite workflow unresolved. Both return nonzero.
+
 `test` starts only the independent `runtime_test` workflow. It does not run
 task, plan, integration, `full_verify`, or `accept`. The complete mode, state,
 repair, quota, and source-bound evidence rules are in [Workflow](WORKFLOW.md);
-the settings needed for the main command and repair role are in
+the settings and adapter examples for the repair role are in
 [Configuration](CONFIGURATION.md).
 
 ## Optional inspection and manual verification

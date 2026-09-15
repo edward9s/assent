@@ -7,6 +7,8 @@ import tempfile
 import tomllib
 
 from assent import AssentError, contracts
+from assent.plan import (RUNTIME_TEST_CONTRACT_NAME,
+                         parse_main_runtime_test_contract)
 from assent.user_home import user_assent_dir, user_config_path
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
@@ -22,6 +24,7 @@ _BRIDGE_BLOCK = "\n".join((_BRIDGE_BEGIN, _BRIDGE_LINE, _BRIDGE_END))
 _GITIGNORE_LINES = [".assent/"]
 _PROJECT_TESTS_BEGIN = "# --- Project test commands begin (project-owned) ---"
 _PROJECT_TESTS_END = "# --- Project test commands end ---"
+_PENDING_MAIN_RUNTIME_TEST = 'execution = "pending"\n'
 
 
 def _template(name: str) -> str:
@@ -413,6 +416,21 @@ def init(path: str | Path = ".") -> int:
 
         project_config = assent_dir / "assent.toml"
         project_adapter = assent_dir / "adapter.toml"
+        main_runtime_contract = assent_dir / RUNTIME_TEST_CONTRACT_NAME
+        if main_runtime_contract.exists():
+            if not main_runtime_contract.is_file():
+                raise AssentError(
+                    f"main runtime-test contract is not a file: "
+                    f"{main_runtime_contract}")
+            main_runtime_contract_content = _read_file(
+                main_runtime_contract, "the main runtime-test contract")
+            parse_main_runtime_test_contract(assent_dir)
+            main_runtime_contract_plan = (
+                "preserved", f"{main_runtime_contract} (project decision, unchanged)")
+        else:
+            main_runtime_contract_content = _PENDING_MAIN_RUNTIME_TEST
+            main_runtime_contract_plan = (
+                "created", f"{main_runtime_contract} (runtime decision pending)")
         project_config_content: str | None = None
         project_config_plan: tuple[str, str] | None = None
         if project_config.exists():
@@ -477,6 +495,8 @@ def init(path: str | Path = ".") -> int:
             _write_bytes(backup, content)
             print(f"  Backed up: {source} -> {backup}")
         _apply(verifier, verifier_content, verifier_plan)
+        _apply(main_runtime_contract, main_runtime_contract_content,
+               main_runtime_contract_plan)
         _apply(root / "AGENTS.md", agents_content, agents_plan)
         _apply(root / ".gitignore", gitignore_content, gitignore_plan)
         if project_config_plan is not None and project_config_content is not None:
@@ -517,4 +537,6 @@ def init(path: str | Path = ".") -> int:
     print("  4. Have the planning AI configure .assent/verify.py and each "
           "plan's _runtime_test.toml")
     print("  5. Once assent check passes, run assent run")
+    print("  6. Run assent test without PLAN when the current main implementation "
+          "is ready for its runtime decision")
     return 0

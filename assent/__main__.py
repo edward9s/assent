@@ -147,11 +147,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "test", help="Test one live plan, or repair-test the current main",
         description=(
             "With PLAN, execute that exact live plan's declared runtime command "
-            "in its candidate worktree. Without PLAN, execute the project-layer "
-            "runtime command in the current primary working tree. This command "
-            "never dispatches task, plan, integration, full verification, or "
-            "accept workflows. Startup output names the target, command source, "
-            "working tree, and current workflow step."))
+            "in its candidate worktree. Without PLAN, resolve or execute the "
+            "main runtime contract in the current primary working tree. This "
+            "command never dispatches task, plan, integration, full verification, "
+            "or accept workflows. Startup output names the target, command "
+            "source, working tree, and current workflow step."))
     test_p.add_argument(
         "plan_name", nargs="?", metavar="PLAN",
         help="Exact live plan for the plan runtime workflow; omit PLAN to test "
@@ -356,8 +356,7 @@ def _print_runtime_test_start(cfg, *, plan_name: str | None) -> None:
     """Show the one target and source selected by ``assent test``."""
     if plan_name is None:
         target = "current main"
-        command_source = ("project config [runtime_test].command ("
-                          f"{cfg.assent_dir / 'assent.toml'})")
+        command_source = f"main runtime contract ({cfg.assent_dir / '_runtime_test.toml'})"
         candidate = cfg.root
     else:
         target = f"live plan {plan_name}"

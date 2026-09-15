@@ -75,53 +75,91 @@ failure。
 已安裝的 `~/.assent/workflow.md` 擁有這份 runtime-test contract；本指南摘要說明
 使用方式。
 
-`assent test [PLAN]` 與 task、plan、integration layer 分開。有 plan argument 時，
-讀取該 live plan 的 `_runtime_test.toml`，在 plan candidate worktree 執行其單一
-command 或有序 command array。沒有 plan argument 時，使用 project layer 的
-`[runtime_test].command`，直接在目前 primary working tree 執行。它不會執行
-`full_verify`、寫入 verification receipt 或接受任何成果。
+`assent test [PLAN]` 與 task、plan、integration、`full_verify`、`accept` 分開。
 
-Plan contract 選擇一個精確的 `execution` mode：`disabled` 沒有 runtime gate；
-`explicit` 只有在明確執行 `assent test PLAN` 時才執行；`after_plan` 則在 `run` 的
-plan workflow 後、selection 的 integration `full_verify` 前自動執行。每個
-`after_plan` source 都必須通過自己的最新 runtime gate，full verification 才會開始。
-Acceptance 會重新檢查相同的 source-bound runtime evidence；`accept` 絕不執行
-runtime testing。
+Main discovery 從 `assent init` 建立的檔案開始：
 
-因此一般使用 `explicit` 的 plan，在 `run` 之後由人執行 `assent test <PLAN>`，
-再執行 `assent accept <PLAN>`。`after_plan` 不需要另外人工 test；`disabled` 則沒有
-runtime gate。
+```toml
+# .assent/_runtime_test.toml
+execution = "pending"
+```
 
-`[workflow].runtime_test` 是由 `{ action = "runtime_test" }` step 與可寫 repair role
-組成的有限 linear array。Project template 嚴格交替 action、`runtime_repairer`、
-action。Array 在第一個非 0 exit 或啟動失敗時停止，並為 repair role 記錄已完成、
-失敗與 not-run 項目。修復改變 source 後，下一個 action 會從第一項重跑。Runtime
-action 才是裁決者：每一項 exit 0 才記為 `PASSED`，非 0 記為 `FAILED`，source 或
-command-list 漂移則記為 `STALE`。Role output 不能宣告 pass。可寫 role 若成功
-結束但沒有修改 working-tree source，workflow 會成為 unresolved，不會自行增加
-action。這項 source-change 要求只適用於 runtime command 確實失敗之後。Plan
-runtime role 若只是完成 injected ignored-input precondition，可以不修改 tracked
-source；下一個 action 接著評估 command。Main runtime command 直接在 primary
-working tree 執行，不使用這項 precondition。
+執行 `assent test` 後，有限流程如下：
 
-Runtime role session 可以在目前 working tree 修改一般 source、test、fixture、
-project configuration 與 documentation；不能執行 command，也不能修改 task
-contract、journal、scheduler state、receipt、Git 或 acceptance state。Runtime state
-保存 workflow cursor、有限 evidence、source identity 與 quota wait。Restart 時恢復
-該 state，working-tree edits 原地保留，不會還原已消耗 token 的成果。Array 耗盡時
-回報 `REVIEW UNRESOLVED, HUMAN DECISION` 並保留 evidence。獨立執行的
-`assent test [PLAN]` 會回傳 1；unattended `run` 將這個需由人類裁決的結果回傳為 0，
-讓其他排隊 plan 繼續執行。
+| Step | 可觀察結果 |
+| --- | --- |
+| `runtime_test` action | 不啟動，也不記成 `FAILED`。 |
+| 可寫 runtime role | 檢查已完成的 primary tree，必要時建立小型 probe；只能提出 `explicit` 與 command。 |
+| scheduler | 還原 role 直接修改的 control file，驗證後再寫入提案。 |
+| 下一個 `runtime_test` action | 從頭執行已寫入的 command。 |
 
-Plan runtime state 是 plan contract 旁的 `.assent/<PLAN>/_runtime_test_workflow.toml`。
-Main runtime state 是 `.assent/_runtime_test_workflow.toml`；command 與 repair 直接
-作用於 primary working tree，edits 留給一般 Git review。Runtime evidence 不是
-verification receipt：`full_verify` 與 receipt 仍是獨立證據，acceptance 需要新鮮的
-receipt 與任何必需的 current runtime gate。
+有效提案如下：
 
-在以 worktree 為基礎的 source workflow 中，ignored-input 決定未完成時，
-action 並未啟動；Assent 會把這項 gate 證據與測試結果分開。FAILED 之後的下一個
-已設定 action 會重新執行；只有匹配的 PASSED 證據可在中斷復原時重用。
+```toml
+# .assent/_runtime_test.toml
+execution = "explicit"
+command = "python tools/runtime_probe.py"
+```
+
+無效提案直接拒絕；所有 role 都未提出時，有限 workflow 以 unresolved 結束。
+`assent check` 維持唯讀，不會啟動 discovery。
+
+Plan directory 內使用同名 contract，但有三種不同 mode：
+
+| `.assent/<PLAN>/_runtime_test.toml` | 效果 |
+| --- | --- |
+| `execution = "disabled"` | 沒有 `command`，也沒有 runtime gate。 |
+| `execution = "explicit"` 加 `command` | 使用 `assent test <PLAN>` 執行。 |
+| `execution = "after_plan"` 加 `command` | `assent run` 在 plan workflow 後、integration `full_verify` 前執行。 |
+
+例如 explicit plan 的操作順序是：
+
+```text
+assent run demo
+assent test demo
+assent accept demo
+```
+
+`after_plan` 省略中間那條指令。`accept` 絕不執行 runtime testing；發布前只重新檢查
+必要且 source-bound 的 runtime evidence。
+
+共用設定直接列出預設 repair loop：
+
+```toml
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+]
+```
+
+Command array 失敗時的流程是：
+
+```text
+runtime_test       第一個非 0 command -> FAILED；後續 command 不執行
+runtime_repairer   修改一般 source、test、fixture、config 或文件
+runtime_test       從第一個 command 重新執行整個 array
+```
+
+只有 action 能記錄 `PASSED`、`FAILED` 或 `STALE`；role 的文字不能宣告通過。真正的
+command 失敗後，role 若未修改 source，結果就是 unresolved。Pending main contract
+提案與完成 ignored-input decision，是可以不修改 tracked source 而前進的兩種情況。
+逐 step adapter 範例見[設定](CONFIGURATION.md)。
+
+| Target | Contract | Workflow state | Working tree |
+| --- | --- | --- | --- |
+| current main | `.assent/_runtime_test.toml` | `.assent/_runtime_test_workflow.toml` | primary tree |
+| live plan | `.assent/<PLAN>/_runtime_test.toml` | `.assent/<PLAN>/_runtime_test_workflow.toml` | plan candidate |
+
+Runtime role 不執行 command，也不修改 Git、journal、receipt、task contract、scheduler
+state 或 acceptance state。Quota interruption 會保留 edits，並從已儲存的位置繼續。
+流程耗盡時回報 `REVIEW UNRESOLVED, HUMAN DECISION`：獨立的
+`assent test [PLAN]` 回傳 1；unattended `run` 回傳 0，讓其他 plan 繼續。Runtime
+evidence 不是 verification receipt；`full_verify` 仍是另一份證據。
 
 Role 與 ability 名稱對 scheduler 沒有特殊意義。Ability 提供 prompt 與寫入
 權限；可寫 role 能修改滿足既有需求所需的一般 candidate file。Task contract、

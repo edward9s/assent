@@ -54,7 +54,24 @@ model = "core"
 
 任一組成 ability 若有 `writes = true`，整個 role 就能寫入。Adapter selection
 屬於 workflow entry：`adapter = "codex"` 指定單一 adapter，`adapter = [...]`
-指定依序嘗試的可用性清單；省略時使用全域 adapter rotation。
+指定依序嘗試的可用性清單；省略時使用 `[adapter].name` 的全域 rotation。內建
+workflow 的所有 role entry 都省略 `adapter`。
+
+因此同一個 role 在每個 workflow position 都能分別選擇：
+
+```toml
+[workflow]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" }, # 使用全域 rotation。
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = "codex" }, # 只使用 Codex。
+  { action = "runtime_test" },
+  # 依序 fallback，並覆寫這一步的 model。
+  { role = "runtime_repairer", adapter = ["claude", "codex"], model = "prime" },
+  { action = "runtime_test" },
+]
+```
 
 Task session 的 model 優先序是 workflow entry model > role model > task file model。Task-local
 workflow entry 只能包含 role 或 action，因此其具名 role 會直接 fallback 到 task
@@ -82,9 +99,17 @@ task = [
   { action = "focused_test" },
   { role = "task_repairer" },
   { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
 ]
 plan = [
   { role = "plan_quality_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
   { action = "focused_sweep" },
   { role = "plan_repairer" },
   { action = "focused_sweep" },
@@ -93,8 +118,16 @@ integration = [
   { action = "full_verify" },
   { role = "integration_repairer" },
   { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
 ]
 runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
   { action = "runtime_test" },
   { role = "runtime_repairer" },
   { action = "runtime_test" },
@@ -112,8 +145,10 @@ runtime_test = [
 | `runtime_test` | `runtime_test` | 在其 candidate 執行宣告的 runtime command。 |
 
 Role session 成功就前進一格。Action 通過就完成該層並略過後續 step；action
-失敗則前進。走完仍未通過時，結果是 `REVIEW UNRESOLVED, HUMAN DECISION`，
-exit zero，並保留所有證據。
+失敗則前進。由 `assent run` 進入的 workflow 若耗盡，結果是 `REVIEW UNRESOLVED,
+HUMAN DECISION`，保留所有證據並回傳 0，讓其他 plan 繼續。獨立執行的
+`assent test [PLAN]` 若耗盡則回傳 1；最後一次 preflight 失敗是拒絕的前置條件，
+同樣回傳非 0。
 
 `preflight` 嚴格交替 `check` action 與可寫 repair role，並以 action 開始和結束。
 `assent run` 會在 task 執行前進入此層；第一個 check 通過就略過所有 repair role。
@@ -157,40 +192,46 @@ workflow = [
 ## Runtime-test 設定
 
 Runtime testing 有自己的 workflow layer，不會重用 task、plan 或 integration
-action。共用設定提供可寫入的 `runtime_repairer` role。Plan 選擇 `explicit` 或
-`after_plan` 時，planning meeting 會在 `.assent/assent.toml` 定義由
-`runtime_test` action 與該 repair role 嚴格交替組成的 `[workflow].runtime_test`
-array。自訂 runtime role 必須可寫入並明確指定 model；array 頭尾都是 action。
+action。共用的 `~/.assent/assent.toml` 提供可寫入的 `runtime_repairer` role，以及
+包含三次修復機會的預設 workflow。Project 可以整體取代
+`[workflow].runtime_test`；array 必須嚴格交替 action 與可寫 role、頭尾都是
+action，而且自訂 role 必須指定 model。每個 role entry 可依上例分別選 adapter。
 
-Main candidate 的 command 是 project-specific，必須寫在 project 的
-`.assent/assent.toml`：
+`assent init` 會建立 main contract `.assent/_runtime_test.toml`，但不猜測專案
+command：
 
 ```toml
-[runtime_test]
+execution = "pending"
+```
+
+第一次執行無參數的 `assent test` 時，pending action 會記錄自己尚未啟動。下一個
+已設定的可寫 role 會檢查完成後的專案，提出精確轉換為 `explicit` 與一個 command：
+
+```toml
+execution = "explicit"
 command = "python -m unittest tests.test_runtime"
 ```
 
-多個有序 command 仍使用同一個單數 key，值改用 array：
+也可以提出有序 command array：
 
 ```toml
-[runtime_test]
+execution = "explicit"
 command = ["python tools/probe_a.py", "python tools/probe_b.py"]
 ```
 
-`assent init` 不會詢問或建立這個 optional main-candidate command。只有需要執行
-不帶 `PLAN` 的 `assent test` 時才明確配置；ability 與 role 定義仍繼承自
-`~/.assent/assent.toml`。
+Role 不能選擇 `disabled`。Assent 會先還原它對 control file 的直接修改，再驗證提案，
+並以 scheduler-owned state 寫入；下一個 action 從第一個 command 開始執行。
+`assent check` 維持唯讀，不會啟動這段探索流程。
 
-這個 `[runtime_test].command` 接受一個非空 string，或由非空 string 組成的非空
-array；只由不帶 `PLAN` 的 `assent test` 使用。每個 plan
-則自行寫入 `_runtime_test.toml` contract；精確的 `execution` mode 與 `command`
-存在規則見 `format.md`。Plan command 不會 fallback 到 `task.verify` 或 project
-command。
+每個 plan 則有自己的 `_runtime_test.toml` contract，可用 `disabled`、`explicit` 或
+`after_plan`；精確規則見 `format.md`。Plan command 不會 fallback 到 main contract
+或 task 的 `verify` command。
 
 Runtime repair ability 可以在 candidate 中修改為滿足需求所需的一般 source、test、
 fixture、project configuration 與 documentation；不能執行 command 或修改
-Assent/Git control state，文字也不能宣告 runtime pass。完整 runtime workflow 與
-candidate lifecycle 見[工作流程](WORKFLOW.md)。
+Assent/Git control state，唯一例外是提出 pending main contract 的一次受驗證轉換；
+文字也不能宣告 runtime pass。完整 runtime workflow 與 candidate lifecycle
+見[工作流程](WORKFLOW.md)。
 
 ## Usage limit
 

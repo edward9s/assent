@@ -91,8 +91,12 @@ These principles jointly govern every design and implementation decision:
 - AI workflow sessions may edit ordinary candidate source, tests,
   configuration, and documentation when writable. They never edit task
   contracts, journals, scheduler state, receipts, Git state, or acceptance
-  state. Protect this small control surface directly; do not recreate task
-  path scopes or inferred ownership.
+  state. A pending main runtime-test session has one scheduler-mediated
+  exception: it may propose replacing root `.assent/_runtime_test.toml` with
+  `execution = "explicit"` and a nonempty command. The scheduler restores the
+  direct edit, validates that exact transition, and installs it. Protect this
+  small control surface directly; do not recreate task path scopes or inferred
+  ownership.
 - Every writable repair role treats the authoritative requirements as the
   source of truth, determines whether each defect is in the tests or the
   implementation, and corrects whichever is wrong. It preserves correct tests

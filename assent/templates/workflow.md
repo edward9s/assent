@@ -56,16 +56,18 @@ and a `writes` flag; roles compose abilities and may choose a model. A workflow
 entry chooses its adapter candidates and its position determines task, plan,
 or integration context.
 
-A writable task, plan, integration, or runtime-test session may change any ordinary candidate file needed to satisfy
-the stated requirements. Predicted paths and task ownership are not write
-boundaries. A read-only session may change no project file. All sessions are
-forbidden from Git, Assent commands, scheduler-owned actions, task contracts,
-journals, receipts, and `.git` or `.assent` state. For unknown or stale local
-input evidence, the bounded `assent ignored-inputs declare` operation is the only
-Assent-command exception. The session supplies the reviewed declaration;
-Assent validates, records, and applies it.
+A writable task, plan, integration, or runtime-test session may change any
+ordinary candidate file needed to satisfy the stated requirements. Predicted
+paths and task ownership are not write boundaries. A read-only session may
+change no project file. All sessions are forbidden from Git, Assent commands,
+scheduler-owned actions, task contracts, journals, receipts, and `.git` or
+`.assent` state except for the two explicit handoffs below. For unknown or stale
+local input evidence, `assent ignored-inputs declare` is the bounded
+Assent-command exception. A main runtime role may propose the root runtime
+contract's exact `pending` to `explicit` transition. The scheduler validates,
+records, and applies both handoffs.
 
-A preflight repair session is the sole management-plane exception. It may
+A preflight repair session is the broader management-plane exception. It may
 repair declarative task, plan, runtime-test, or project configuration named by
 failed check evidence. It may not change task status, journals, workflow
 cursors, action evidence, receipts, Git state, candidate source, or acceptance
@@ -119,9 +121,19 @@ writes a verification receipt, or accepts a plan.
 
 With `PLAN`, the command reads that live plan's `_runtime_test.toml` and runs
 its declared command or ordered commands in the plan candidate worktree.
-Without `PLAN`, it uses the project-layer `[runtime_test].command` directly in
-the current primary working tree. The main command is project-specific and is
-not supplied by the shared settings template.
+Without `PLAN`, it reads the root `.assent/_runtime_test.toml` contract and
+works directly in the current primary working tree.
+
+`assent init` creates the root contract with `execution = "pending"`; it cannot
+know either the command or its execution mechanism before implementation. A
+pending action records that it did not start and advances to the next configured
+writable role. That role inspects the implemented project, may create the
+smallest useful runtime probe, and proposes only `execution = "explicit"` with
+a non-empty command or command array. The scheduler captures the proposal,
+restores the role's direct control-file edit, validates the exact transition,
+and installs it. The following action runs the command. A missing proposal
+exhausts the finite workflow; an invalid proposal is refused. `assent check`
+remains read-only and never starts this discovery.
 
 The plan contract selects one exact `execution` mode. `disabled` has no runtime
 gate. `explicit` runs only when `assent test PLAN` is requested. `after_plan`
@@ -134,33 +146,39 @@ runtime evidence before publication.
 `[workflow].runtime_test` is a separate finite linear array. Its legal action is
 `{ action = "runtime_test" }`; every role between actions is writable and has
 an explicit model, and the array strictly alternates action and role starting
-and ending with an action. The planning meeting uses `runtime_repairer` for the
-default repair roles. The external `command` value is one string or a non-empty
-string array. The scheduler runs array entries in order and stops at the first nonzero
-exit or launch failure. Evidence identifies every completed command, the failed
-command, and later entries that did not run. A repair invalidates earlier
-successes, so the next action starts again at the first command. The runtime
-action is authoritative: completing every command with exit 0 records `PASSED`,
-a nonzero exit records `FAILED`, and source or command-list drift records `STALE`.
+and ending with an action. The shared settings use three `runtime_repairer`
+attempts. A project may replace the array; each role entry may select one adapter
+or an ordered adapter list. The `command` value is one string or a non-empty
+string array. The scheduler runs array entries in order and stops at the first
+nonzero exit or launch failure. Evidence identifies every completed command,
+the failed command, and later entries that did not run. A repair invalidates
+earlier successes, so the next action starts again at the first command. The
+runtime action is authoritative: completing every command with exit 0 records
+`PASSED`, a nonzero exit records `FAILED`, and source or command-list drift
+records `STALE`.
 Role output never declares a pass. A successful writable runtime role that
 makes no working-tree source change ends the workflow unresolved; no extra action
 is invented. This source-change requirement applies only after a runtime
-command actually failed. A role that settles an injected ignored-input
-precondition may advance without changing tracked source, and the next action
-then evaluates the command.
+command actually failed. It does not block the scheduler-validated pending main
+contract transition. A role that settles an injected ignored-input precondition
+may also advance without changing tracked source, and the next action then
+evaluates the command.
 
 A runtime repair role may edit ordinary project source, tests, fixtures, project
 configuration, and documentation in its working tree. It may not run commands or
 modify task contracts, journals, scheduler state, receipts, Git state,
 acceptance state, or other control state, and it cannot declare the runtime test
-passed. The scheduler alone runs the runtime action, records evidence, changes
-state, and owns Git transitions.
+passed. Its sole control-file proposal is the pending root contract transition
+described above; the scheduler restores, validates, and installs it. The
+scheduler alone runs the runtime action, records evidence, changes state, and
+owns Git transitions.
 
 Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
 plan, and its candidate is `<project>.worktrees/<PLAN>/`. Main runtime state is
-`.assent/_runtime_test_workflow.toml`; its commands and repairs operate directly
-in the primary working tree. Quota waits, role progress, bounded evidence, and
-source identity are persisted. A restart resumes the workflow position, while
+`.assent/_runtime_test_workflow.toml`, and the root contract is
+`.assent/_runtime_test.toml`; its commands and repairs operate directly in the
+primary working tree. Quota waits, role progress, bounded evidence, and source
+identity are persisted. A restart resumes the workflow position, while
 working-tree edits remain visible for ordinary Git review. Token-burned work is
 never reverted.
 
@@ -236,10 +254,9 @@ Task, plan, and runtime-test workflows use one finite linear interpreter:
 2. A passing action completes the layer immediately; later roles are skipped.
 3. A failing non-final action records its exact command/output and advances to
    the next configured step.
-4. In a worktree-backed source workflow, an unsettled ignored-input
-   decision records that the action did not start; it never becomes test
-   failure evidence. Main runtime commands run in the primary working tree and
-   do not use this gate.
+4. An unsettled ignored-input decision in a worktree-backed source workflow, or
+   a pending root runtime contract in the main workflow, records that the action
+   did not start; neither becomes test failure evidence.
 5. If the array ends without a passing action, all edits and evidence remain and
    the outcome is `REVIEW UNRESOLVED, HUMAN DECISION`.
 

@@ -112,8 +112,12 @@ full verification for the human.
   conflict workspaces explicitly named by the runtime prompt. Confirm paths
   before writing. The main tree is read-only except when a main runtime-test
   prompt explicitly makes that primary working tree the writable session cwd.
-  That exception does not include task contracts, journals, scheduler state,
-  or `~/.assent`; the scheduler owns their transitions.
+  When that prompt states that the root `.assent/_runtime_test.toml` is pending,
+  the session may propose only `execution = "explicit"` with a non-empty
+  command. The scheduler restores the direct edit, validates the proposal, and
+  installs it. The exception does not include plan runtime-test contracts,
+  task contracts, journals, scheduler state, or `~/.assent`; the scheduler owns
+  their transitions.
 - Command side effects count as writes. A check, compiler, importer, formatter,
   generator, or test must leave no non-ignored generated artifact in the
   project worktree; use a non-writing check or project-approved temporary output

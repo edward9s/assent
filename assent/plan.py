@@ -48,7 +48,8 @@ _ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
 _MAX_ACTION_EVIDENCE_ITEMS = 20
 _MAX_ACTION_EVIDENCE_CHARS = 4096
 RUNTIME_TEST_CONTRACT_NAME = "_runtime_test.toml"
-_RUNTIME_TEST_EXECUTIONS = {"disabled", "explicit", "after_plan"}
+_PLAN_RUNTIME_TEST_EXECUTIONS = {"disabled", "explicit", "after_plan"}
+_MAIN_RUNTIME_TEST_EXECUTIONS = {"pending", "explicit"}
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ class TaskWorkflowRole(str):
 
 @dataclass(frozen=True)
 class RuntimeTestContract:
-    """The exact runtime-test decision declared by one plan."""
+    """One validated plan or main runtime-test decision."""
 
     execution: str
     commands: tuple[str, ...] | None
@@ -615,9 +616,10 @@ def _task_workflow(
     return tuple(entries)
 
 
-def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
-    """Read and validate the runtime-test contract at a plan root."""
-    path = Path(plan_dir) / RUNTIME_TEST_CONTRACT_NAME
+def _parse_runtime_test_contract(
+        owner_dir: Path, executions: set[str]) -> RuntimeTestContract:
+    """Read one runtime-test contract with its context's exact executions."""
+    path = Path(owner_dir) / RUNTIME_TEST_CONTRACT_NAME
     try:
         with open(path, "rb") as source:
             data = tomllib.load(source)
@@ -630,6 +632,13 @@ def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
     except tomllib.TOMLDecodeError as error:
         raise AssentError(
             f"Runtime-test contract {path.name} is not valid TOML: {error}") from error
+
+    return _validate_runtime_test_contract(data, path, executions)
+
+
+def _validate_runtime_test_contract(
+        data: dict, path: Path, executions: set[str]) -> RuntimeTestContract:
+    """Validate one already parsed runtime-test document."""
 
     unknown = sorted(set(data) - {"execution", "command"})
     if unknown:
@@ -644,16 +653,17 @@ def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
     if not isinstance(execution, str):
         raise AssentError(
             f"Runtime-test contract {path.name} field execution must be a string")
-    if execution not in _RUNTIME_TEST_EXECUTIONS:
+    if execution not in executions:
+        values = ", ".join(sorted(executions))
         raise AssentError(
             f"Runtime-test contract {path.name} has unknown execution {execution!r}"
-            " (valid values: after_plan, disabled, explicit)")
+            f" (valid values: {values})")
 
-    if execution == "disabled":
+    if execution in {"disabled", "pending"}:
         if "command" in data:
             raise AssentError(
                 f"Runtime-test contract {path.name} with execution = "
-                '"disabled" must not define command')
+                f'"{execution}" must not define command')
         return RuntimeTestContract(execution, None)
 
     if "command" not in data:
@@ -683,6 +693,30 @@ def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
                 f"Runtime-test contract {path.name} field command{suffix} must not "
                 "be empty or whitespace")
     return RuntimeTestContract(execution, commands)
+
+
+def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
+    """Read and validate the runtime-test contract at a plan root."""
+    return _parse_runtime_test_contract(
+        plan_dir, _PLAN_RUNTIME_TEST_EXECUTIONS)
+
+
+def parse_main_runtime_test_contract(assent_dir: Path) -> RuntimeTestContract:
+    """Read the main contract used by ``assent test`` without PLAN."""
+    return _parse_runtime_test_contract(
+        assent_dir, _MAIN_RUNTIME_TEST_EXECUTIONS)
+
+
+def parse_main_runtime_test_contract_text(text: str) -> RuntimeTestContract:
+    """Validate a main-contract proposal before the scheduler installs it."""
+    path = Path(RUNTIME_TEST_CONTRACT_NAME)
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is not valid TOML: {error}") from error
+    return _validate_runtime_test_contract(
+        data, path, _MAIN_RUNTIME_TEST_EXECUTIONS)
 
 
 def journal_path_for(task_path: Path) -> Path:

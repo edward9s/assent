@@ -7,8 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import AssentError
-from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
-                           WorkflowActionStep, WorkflowRoleStep, load_config)
+from assent.config import WorkflowActionStep, WorkflowRoleStep, load_config
 
 
 MODEL_VALUES = {
@@ -56,8 +55,8 @@ class TestRuntimeTestConfig(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def config_text(self, workflow: str, *, runtime_test: str = "",
-                    adapters=("claude",), model_entries=None) -> str:
+    def config_text(self, workflow: str, *, adapters=("claude",),
+                    model_entries=None) -> str:
         model_entries = model_entries or MODEL_VALUES
         names = (json.dumps(list(adapters)) if len(adapters) != 1
                  else json.dumps(adapters[0]))
@@ -66,17 +65,13 @@ class TestRuntimeTestConfig(unittest.TestCase):
             text += f"\n[adapter.{name}.models]\n"
             text += "\n".join(f'{tier} = "{selection}"'
                                for tier, selection in values.items()) + "\n"
-        if runtime_test:
-            text += "\n" + runtime_test.strip() + "\n"
         return text + "\n" + workflow.strip() + "\n"
 
-    def load(self, workflow: str,
-             *, runtime_test: str = "", adapters=("claude",),
-             model_entries=None):
+    def load(self, workflow: str, *, adapters=("claude",), model_entries=None):
         path = self.assent_dir / "assent.toml"
         path.write_text(
-            self.config_text(workflow, runtime_test=runtime_test,
-                             adapters=adapters, model_entries=model_entries),
+            self.config_text(
+                workflow, adapters=adapters, model_entries=model_entries),
             encoding="utf-8")
         return load_config(path, "plan01")
 
@@ -119,64 +114,12 @@ runtime_test = [{ action = "runtime_test" }]
     def test_runtime_test_workflow_omission_stays_unset(self):
         cfg = self.load('[workflow]\ntask = [{ action = "focused_test" }]')
         self.assertIsNone(cfg.workflow_runtime_test)
-        self.assertIsNone(cfg.runtime_test_commands)
-        self.assertEqual(cfg.source_of("runtime_test.command"), BUILTIN_LAYER)
 
-    def test_runtime_command_and_workflow_do_not_fallback_to_each_other(self):
-        cfg = self.load(
-            '[workflow]\ntask = [{ action = "focused_test" }]',
-            runtime_test='[runtime_test]\ncommand = "run-project"')
-        self.assertEqual(cfg.runtime_test_commands, ("run-project",))
-        self.assertIsNone(cfg.workflow_runtime_test)
-
-        cfg = self.load(
-            """
-[workflow]
-task = [{ action = "focused_test" }]
-runtime_test = [{ action = "runtime_test" }]
-""")
-        self.assertIsNone(cfg.runtime_test_commands)
-
-    def test_runtime_command_keeps_project_and_user_provenance(self):
-        self.write_user('[runtime_test]\ncommand = "user-command"\n')
-        cfg = self.load(
-            '[workflow]\ntask = [{ action = "focused_test" }]',
-            runtime_test='[runtime_test]\ncommand = "project-command"')
-        self.assertEqual(cfg.runtime_test_commands, ("project-command",))
-        self.assertEqual(cfg.source_of("runtime_test.command"), PROJECT_LAYER)
-
-        cfg = self.load('[workflow]\ntask = [{ action = "focused_test" }]')
-        self.assertEqual(cfg.runtime_test_commands, ("user-command",))
-        self.assertEqual(cfg.source_of("runtime_test.command"), USER_LAYER)
-
-    def test_runtime_command_array_is_ordered_and_nonempty(self):
-        cfg = self.load(
-            '[workflow]\ntask = [{ action = "focused_test" }]',
-            runtime_test=(
-                '[runtime_test]\n'
-                'command = ["first", "second", "third"]'))
-        self.assertEqual(
-            cfg.runtime_test_commands, ("first", "second", "third"))
-
-        for value, message in (
-                ('[]', "must not be empty"),
-                ('["run", 1]', "array must contain only strings"),
-                ('["run", "  "]', "runtime_test.command.*blank")):
-            with self.subTest(value=value), self.assertRaisesRegex(
-                    AssentError, message):
-                self.load(
-                    '[workflow]\ntask = [{ action = "focused_test" }]',
-                    runtime_test=f'[runtime_test]\ncommand = {value}')
-
-    def test_runtime_command_is_nonblank_and_runtime_section_is_closed(self):
-        with self.assertRaisesRegex(AssentError, "runtime_test.command.*blank"):
+    def test_runtime_command_is_not_a_config_setting(self):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys: runtime_test"):
             self.load(
-                '[workflow]\ntask = [{ action = "focused_test" }]',
-                runtime_test='[runtime_test]\ncommand = "   "')
-        with self.assertRaisesRegex(AssentError, "unknown keys.*extra"):
-            self.load(
-                '[workflow]\ntask = [{ action = "focused_test" }]',
-                runtime_test='[runtime_test]\ncommand = "run"\nextra = true')
+                '[workflow]\ntask = [{ action = "focused_test" }]\n'
+                '[runtime_test]\ncommand = "run"')
 
     def test_runtime_test_structure_rejects_invalid_arrays(self):
         cases = (

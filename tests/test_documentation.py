@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 import unittest
 from pathlib import Path
 from urllib.parse import unquote
@@ -19,6 +20,16 @@ def _read(relative: Path) -> str:
 
 def _flat(text: str) -> str:
     return "".join(text.split())
+
+
+def _documented_default_workflow(relative: Path) -> dict:
+    text = _read(relative)
+    match = re.search(
+        r"```toml\n(\[workflow\]\npreflight = \[.*?\n\])\n```", text,
+        flags=re.DOTALL)
+    if match is None:
+        raise AssertionError(f"default workflow example missing from {relative}")
+    return tomllib.loads(match.group(1))["workflow"]
 
 
 def _reader_surfaces() -> list[Path]:
@@ -55,6 +66,30 @@ def _case_sensitive_file(relative: Path) -> bool:
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_default_workflow_examples_match_the_shipped_template(self):
+        shipped = tomllib.loads(
+            _read(Path("assent/templates/assent.toml")))["workflow"]
+        for relative in (Path("docs/CONFIGURATION.md"),
+                         Path("docs/zh-TW/CONFIGURATION.md")):
+            with self.subTest(path=relative):
+                self.assertEqual(_documented_default_workflow(relative), shipped)
+
+    def test_runtime_workflow_is_shown_as_examples(self):
+        english = _read(Path("docs/WORKFLOW.md"))
+        chinese = _read(Path("docs/zh-TW/WORKFLOW.md"))
+        for phrase in (
+                "| Step | Observable result |",
+                '# .assent/_runtime_test.toml\nexecution = "pending"',
+                "runtime_test       first nonzero command -> FAILED",
+                "| Target | Contract | Workflow state | Working tree |"):
+            self.assertIn(phrase, english)
+        for phrase in (
+                "| Step | 可觀察結果 |",
+                '# .assent/_runtime_test.toml\nexecution = "pending"',
+                "runtime_test       第一個非 0 command -> FAILED",
+                "| Target | Contract | Workflow state | Working tree |"):
+            self.assertIn(phrase, chinese)
+
     def test_guides_have_reciprocal_english_and_chinese_links(self):
         for topic in TOPICS:
             english = Path("docs") / f"{topic}.md"
@@ -200,8 +235,9 @@ class DocumentationTests(unittest.TestCase):
         )).split())
         for phrase in (
                 "assent test [PLAN]", "assent test <PLAN>",
-                "_runtime_test.toml", "[runtime_test].command",
+                "_runtime_test.toml", 'execution = "pending"',
                 "execution = \"after_plan\"", "runtime_repairer",
+                'adapter = "codex"', 'adapter = ["claude", "codex"]',
                 "ordered command array", "stops at its first failed command",
                 "full_verify", "source-bound", "REVIEW UNRESOLVED, HUMAN DECISION"):
             with self.subTest(language="English", phrase=phrase):
@@ -216,8 +252,9 @@ class DocumentationTests(unittest.TestCase):
         )).split())
         for phrase in (
                 "assent test [PLAN]", "assent test <PLAN>",
-                "_runtime_test.toml", "[runtime_test].command",
+                "_runtime_test.toml", 'execution = "pending"',
                 "execution = \"after_plan\"", "runtime_repairer",
+                'adapter = "codex"', 'adapter = ["claude", "codex"]',
                 "有序 command array", "第一個失敗 command 停止",
                 "full_verify", "source-bound", "REVIEW UNRESOLVED, HUMAN DECISION"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
