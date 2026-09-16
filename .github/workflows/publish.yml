@@ -1,10 +1,8 @@
 name: Publish to PyPI
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/publish.yml"
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -15,10 +13,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out v0.1.0a12
+      - name: Check out the release
         uses: actions/checkout@v6
         with:
-          ref: v0.1.0a12
           persist-credentials: false
 
       - name: Set up Python
@@ -29,6 +26,7 @@ jobs:
       - name: Verify the release tag
         shell: python
         run: |
+          import os
           import pathlib
           import tomllib
 
@@ -36,7 +34,7 @@ jobs:
               pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
           )
           expected = "v" + metadata["project"]["version"]
-          actual = "v0.1.0a12"
+          actual = os.environ["GITHUB_REF_NAME"]
           if actual != expected:
               raise SystemExit(
                   f"Release tag {actual!r} must match project version {expected!r}."
