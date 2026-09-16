@@ -3,6 +3,10 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish.yml"
 
 permissions:
   contents: read
@@ -10,12 +14,14 @@ permissions:
 jobs:
   build:
     name: Build distributions
+    if: github.event_name == 'release' || github.event.head_commit.message == 'chore: republish 0.1.0a12 to PyPI'
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out the release
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event_name == 'push' && 'v0.1.0a12' || github.ref }}
           persist-credentials: false
 
       - name: Set up Python
@@ -34,7 +40,11 @@ jobs:
               pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
           )
           expected = "v" + metadata["project"]["version"]
-          actual = os.environ["GITHUB_REF_NAME"]
+          actual = (
+              "v0.1.0a12"
+              if os.environ["GITHUB_EVENT_NAME"] == "push"
+              else os.environ["GITHUB_REF_NAME"]
+          )
           if actual != expected:
               raise SystemExit(
                   f"Release tag {actual!r} must match project version {expected!r}."
