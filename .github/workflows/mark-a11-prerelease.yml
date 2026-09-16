@@ -1,0 +1,19 @@
+name: Mark v0.1.0a11 as pre-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/mark-a11-prerelease.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  update-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark v0.1.0a11 as pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit v0.1.0a11 --repo edward9s/assent --prerelease
