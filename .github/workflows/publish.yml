@@ -52,6 +52,7 @@ jobs:
       - name: Store distributions
         uses: actions/upload-artifact@v5
         with:
+          retention-days: 7
           name: python-package-distributions
           path: dist/
           if-no-files-found: error
